@@ -1,1 +1,134 @@
-perpertual dex di elysium chain with hype fee gas
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+contract ElysiumPerpetualDEX {
+    using SafeERC20 for IERC20;
+
+    IERC20 public collateralToken;
+    address public owner;
+
+    uint256 public tradingFee = 10; // 0.1%
+    uint256 public constant FEE_DENOMINATOR = 10000;
+    uint256 public constant MAX_LEVERAGE = 10;
+
+    struct Position {
+        uint256 collateral;
+        uint256 size;
+        uint256 entryPrice;
+        bool isLong;
+        bool isOpen;
+    }
+
+    mapping(address => Position) public positions;
+
+    event PositionOpened(
+        address indexed trader,
+        bool isLong,
+        uint256 collateral,
+        uint256 size
+    );
+
+    event PositionClosed(
+        address indexed trader,
+        uint256 payout
+    );
+
+    constructor(address _collateralToken) {
+        collateralToken = IERC20(_collateralToken);
+        owner = msg.sender;
+    }
+
+    function openPosition(
+        uint256 collateral,
+        uint256 leverage,
+        uint256 price,
+        bool isLong
+    ) external {
+        require(!positions[msg.sender].isOpen, "Position exists");
+        require(collateral > 0, "Invalid collateral");
+        require(leverage > 0 && leverage <= MAX_LEVERAGE, "Invalid leverage");
+        require(price > 0, "Invalid price");
+
+        collateralToken.safeTransferFrom(
+            msg.sender,
+            address(this),
+            collateral
+        );
+
+        uint256 size = collateral * leverage;
+
+        uint256 fee = (size * tradingFee) / FEE_DENOMINATOR;
+
+        require(collateral > fee, "Fee too high");
+
+        positions[msg.sender] = Position({
+            collateral: collateral - fee,
+            size: size,
+            entryPrice: price,
+            isLong: isLong,
+            isOpen: true
+        });
+
+        emit PositionOpened(msg.sender, isLong, collateral, size);
+    }
+
+    function closePosition(uint256 currentPrice) external {
+        Position storage p = positions[msg.sender];
+
+        require(p.isOpen, "No open position");
+        require(currentPrice > 0, "Invalid price");
+
+        uint256 payout = p.collateral;
+
+        uint256 priceChange;
+
+        if (currentPrice >= p.entryPrice) {
+            priceChange = (
+                p.size * (currentPrice - p.entryPrice)
+            ) / p.entryPrice;
+
+            if (!p.isLong) {
+                payout = payout > priceChange
+                    ? payout - priceChange
+                    : 0;
+            } else {
+                payout += priceChange;
+            }
+        } else {
+            priceChange = (
+                p.size * (p.entryPrice - currentPrice)
+            ) / p.entryPrice;
+
+            if (p.isLong) {
+                payout = payout > priceChange
+                    ? payout - priceChange
+                    : 0;
+            } else {
+                payout += priceChange;
+            }
+        }
+
+        uint256 fee = (payout * tradingFee) / FEE_DENOMINATOR;
+
+        payout = payout > fee ? payout - fee : 0;
+
+        delete positions[msg.sender];
+
+        if (payout > 0) {
+            collateralToken.safeTransfer(msg.sender, payout);
+        }
+
+        emit PositionClosed(msg.sender, payout);
+    }
+
+    function updateTradingFee(uint256 newFee) external {
+        require(msg.sender == owner, "Not owner");
+        require(newFee <= 100, "Fee too high");
+
+        tradingFee = newFee;
+    }
+}
